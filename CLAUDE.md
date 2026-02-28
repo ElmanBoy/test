@@ -12,11 +12,14 @@ The system supports regulatory monitoring workflows: task assignment, registries
 
 | Layer | Technology |
 |---|---|
-| Backend | PHP (namespaced OOP, `Core\Auth`, `Core\Db`) |
-| Frontend | Vanilla JavaScript (no framework) |
-| PWA | Service Worker + Web App Manifest |
-| WebSockets | Ratchet PHP library (ports 3010 / 3011 TLS) |
+| Backend | PHP (namespaced OOP, `Core\*`) |
+| Frontend | JavaScript + jQuery (no SPA framework) |
+| UI Libraries | TinyMCE (rich text), Flatpickr (dates), Bootstrap (modals), jQuery Toast (notifications) |
+| Icons | Material Design Icons (CDN) |
+| PWA | Service Worker v1.6.1 + Web App Manifest |
+| WebSockets | Ratchet v0.4.4 PHP library (ports 3010 / 3011 TLS) |
 | Web Push | VAPID-based push notifications |
+| Database | PostgreSQL (via custom `Core\Db` abstraction) |
 | Dependency mgmt | Composer (PHP) |
 | Config/secrets | `vlucas/phpdotenv` — `.env` file at document root |
 
@@ -50,8 +53,9 @@ The system supports regulatory monitoring workflows: task assignment, registries
 │       └── quarter_select.js
 │
 ├── modules/               # Feature modules (see Module Structure below)
-│   ├── api/               # API management module
-│   └── assigned/          # Task assignment module
+│   ├── api/               # API management module (id=20, parent=settings)
+│   │   └── props/         # Registry/field management sub-module (id=5)
+│   └── assigned/          # Task assignment module (id=15)
 │
 ├── web-push/              # Web Push notification support
 │   ├── config.php         # Loads VAPID keys from .env
@@ -147,23 +151,68 @@ Vendor dependencies are at `/var/www/html/core/vendor/autoload.php` (Composer au
 
 Key classes:
 - `Core\Auth` — login state, CSRF token generation, default page per role
-- `Core\Db` — database access layer
+- `Core\Db` — database abstraction layer (`select`, `selectOne`, `insert`, `getRegistry`, etc.)
+- `Core\Gui` — UI building utilities (forms, tables, filters)
+- `Core\Registry` — data registry management
+- `Core\Date` — date/time utilities
+- `Core\WebSocketServer` — real-time communication
+- `R` — shorthand database class used in web-push handlers
 
 ---
 
 ## Frontend JavaScript
 
-### `el_app` (js/core/app.js)
+The frontend uses three global namespace objects — avoid polluting the global scope with anything else.
 
-The global application object. All frontend functionality is attached as methods to `el_app`. This is the primary frontend API — prefer extending this object for new frontend features.
+### `el_app` (js/core/app.js — 142 KB, ~2,233 lines)
 
-### `tools.js`
+The primary application object. All frontend functionality is attached as methods to `el_app`:
 
-Utility/helper functions. Use these before writing new utility code.
+- `loadContent()` — AJAX content loader
+- `setMainContent()` — sets main page content area
+- `dialog_open()` / `dialog_close()` — modal management
+- `loader_show()` / `loader_hide()` — loading indicators
+- `reloadMainContent()` — refreshes current page content
+- Push notification registration and WebSocket initialization
+
+Extend this object for new frontend features.
+
+### `el_tools` (js/core/tools.js — 47 KB, ~1,274 lines)
+
+Utility/helper object:
+
+- `notify()` — custom alert/confirm dialogs (overrides native `alert()`/`confirm()`)
+- `notify_close()` — close notification dialogs
+- Toast notification helpers
+
+### `el_registry` (modules/*/js/registry.js)
+
+Per-module registry object for CRUD operations on dynamic data tables.
 
 ### `autocomplete.js` / `suggest.js`
 
 Reusable input autocomplete and suggestion components.
+
+### JavaScript Patterns
+
+```javascript
+// Async/await with el_app
+async function handler() {
+    await el_app.loadContent(url, params);
+}
+
+// Event-based communication
+PromiseAlert.on('alert_close', resolve);
+$(element).trigger('alert_confirmed');
+
+// jQuery chaining convention
+$('.selector').off('click').on('click', handler);
+
+// WebSocket check before send
+if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'event', data: payload }));
+}
+```
 
 ### Asset Scripts (`js/assets/`)
 
@@ -172,6 +221,35 @@ Standalone scripts for specific features:
 - `agreement_list.js` — Agreement list UI
 - `certificate.js` — Certificate handling
 - `quarter_select.js` — Quarter/period date selector
+
+---
+
+## Database Patterns
+
+**Database:** PostgreSQL, accessed via `Core\Db`.
+
+### Query Methods
+
+```php
+$db->select('table_name', 'WHERE id = ?', [$id])
+$db->selectOne('table_name', 'WHERE id = ?', [$id])
+$db->insert('table_name', $dataArray)
+$db->getRegistry($registryId)
+$db->db::getAll('SELECT ... FROM ... WHERE ...', [$params])
+```
+
+### Table Naming
+
+- Use `TBL_PREFIX` constant for table name prefixes
+- Registry tables: `registry`, `regfields`, `regprops`
+- Domain tables: `documents`, `checksplans`, `institutions`, `units`, `users`, `persons`, `inspections`, `tasks`
+- Push subscriptions: `cam_subscriptions`
+
+### Special Patterns
+
+- JSON columns for complex nested data (e.g., `pl->addinstitution`)
+- PostgreSQL upsert: `ON CONFLICT` clauses in push subscription handling
+- Parameterized queries using `?` placeholders throughout
 
 ---
 
@@ -251,8 +329,11 @@ Required env vars:
 ### JavaScript Conventions
 
 - Attach new functionality to `el_app` object (defined in `js/core/app.js`)
-- Use utility functions from `tools.js` before reinventing
+- Use `el_tools` utility functions before reinventing notification/dialog logic
 - No build step — files are served directly (no bundler/transpiler)
+- Use JSDoc comments with `@function`, `@memberof`, `@param` tags
+- Use jQuery for DOM — no raw `document.querySelector` chains
+- Comments and variable names may be in Russian (Cyrillic) — this is expected
 
 ---
 
@@ -275,9 +356,11 @@ Required env vars:
 
 ---
 
-## File Size Notes
+## Codebase Scale
 
-- `js/core/app.js` — 142 KB (large, core frontend logic)
-- `js/core/tools.js` — 47 KB
+- ~83 source files (PHP, JS, JSON, CSS)
+- ~27,650 lines of PHP and JavaScript
+- `js/core/app.js` — 142 KB (~2,233 lines), core frontend logic
+- `js/core/tools.js` — 47 KB (~1,274 lines)
 - `core/composer.lock` — 191 KB
-- `checkappmodile.svg` / `modules.zip` — large binary assets, do not edit in place
+- `checkappmodile.svg` (~1.8 MB) / `modules.zip` (~1.7 MB) — large binary assets, do not edit
